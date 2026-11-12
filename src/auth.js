@@ -43,15 +43,22 @@ function verificarPassword(password, almacenado) {
   }
 }
 
+let secretoEfimero = null;
+
 function secreto() {
   const secretoConfigurado = process.env.JWT_SECRET;
-  if (!secretoConfigurado) {
-    if (process.env.NODE_ENV === "production") {
-      throw new Error("JWT_SECRET es obligatorio en producción");
-    }
-    return "secreto-solo-para-desarrollo-cambiar-en-produccion";
+  if (secretoConfigurado) return secretoConfigurado;
+
+  // Sin JWT_SECRET se usa un secreto aleatorio por proceso: las sesiones se
+  // invalidan al reiniciar el servicio, pero el inicio de sesión nunca falla.
+  if (!secretoEfimero) {
+    secretoEfimero = crypto.randomBytes(32).toString("hex");
+    console.warn(
+      "[auth] JWT_SECRET no está definida: se usa un secreto temporal. " +
+        "Defínala en las variables de entorno para conservar las sesiones entre reinicios.",
+    );
   }
-  return secretoConfigurado;
+  return secretoEfimero;
 }
 
 function firmarToken(usuario) {

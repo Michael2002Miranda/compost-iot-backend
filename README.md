@@ -21,8 +21,12 @@ npm test                  # pruebas
 
 ### Base de datos
 
-Ejecutar `db/schema.sql` en el **SQL Editor de Supabase** (o `psql -f db/schema.sql`).
-El script es idempotente: conserva los registros existentes de `mediciones`.
+El backend aplica `db/schema.sql` **automáticamente al arrancar** (ver `src/migrar.js`),
+así que las tablas se crean solas en el primer despliegue. El script es idempotente:
+conserva los registros existentes de `mediciones`.
+
+Para desactivarlo, definir `AUTO_MIGRAR=false` y ejecutar el script a mano en el
+**SQL Editor de Supabase** (o `psql -f db/schema.sql`).
 
 Crea: `usuarios`, `composteras`, `mediciones`, `alertas`, `registros_ppfm`,
 `registros_cfc`, `evaluaciones_sus`, `pruebas_funcionalidad` y la vista
