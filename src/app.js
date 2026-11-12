@@ -156,7 +156,8 @@ function crearApp(pool, { registrar = console } = {}) {
     const { rows } = await pool.query(
       `SELECT c.*,
               (SELECT COUNT(*)::int FROM mediciones m WHERE m.id_compostera = c.id) AS lecturas,
-              (SELECT MAX(m.fecha_hora) FROM mediciones m WHERE m.id_compostera = c.id) AS ultima_lectura
+              (SELECT MAX(m.fecha_hora) FROM mediciones m WHERE m.id_compostera = c.id) AS ultima_lectura,
+              (SELECT MIN(m.fecha_hora) FROM mediciones m WHERE m.id_compostera = c.id) AS primera_lectura
          FROM composteras c
         WHERE c.usuario_id = $1
         ORDER BY c.id`,
