@@ -652,3 +652,9 @@ function crearApp(pool, { registrar = console } = {}) {
 }
 
 module.exports = { crearApp };
+
+// Compatibilidad con despliegues que arrancan con `node src/app.js`
+// (comando de inicio que tenía el servicio en Render antes de este cambio).
+if (require.main === module) {
+  require("./index");
+}
