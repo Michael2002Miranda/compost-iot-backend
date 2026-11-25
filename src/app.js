@@ -18,6 +18,7 @@ const {
   validarRegistroCfc,
   filtrosMediciones,
 } = require("./validacion");
+const push = require("./push");
 
 const EMAIL = /^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/;
 
@@ -70,8 +71,42 @@ function crearApp(pool, { registrar = console } = {}) {
     return `CMP-${Date.now().toString(36).toUpperCase()}`;
   }
 
-  function validarCredenciales(body = {}) {
-    const detalles = [];
+  // Avisos push: como máximo uno cada 15 minutos por compostera, para no
+  // saturar al usuario cuando el sensor queda fuera de rango.
+  const ultimoAviso = new Map();
+  const ESPERA_AVISO_MS = 15 * 60 * 1000;
+
+  async function avisarAlerta(idCompostera, clasificacion) {
+    if (!push.configurado()) return;
+
+    const ahora = Date.now();
+    if (ahora - (ultimoAviso.get(idCompostera) ?? 0) < ESPERA_AVISO_MS) return;
+
+    const { rows } = await pool.query(
+      `SELECT u.fcm_token, c.nombre
+         FROM composteras c
+         JOIN usuarios u ON u.id = c.usuario_id
+        WHERE c.id = $1`,
+      [idCompostera],
+    );
+
+    const token = rows[0]?.fcm_token;
+    if (!token) return;
+
+    const alerta = clasificacion.alertas[0];
+    const enviado = await push.enviarPush(token, {
+      titulo: `Alerta en ${rows[0].nombre}`,
+      cuerpo: `${alerta.mensaje} (${alerta.parametro}: ${alerta.valor}${alerta.unidad || ""})`,
+      datos: { compostera: idCompostera, parametro: alerta.parametro, fase: clasificacion.fase.codigo },
+    });
+
+    if (enviado) {
+      ultimoAviso.set(idCompostera, ahora);
+      registrar.log(`[push] aviso enviado por la compostera ${idCompostera}`);
+    }
+  }
+
+  function validarCredenciales(body = {}) {    const detalles = [];
     const email = String(body.email || "").trim().toLowerCase();
     const password = String(body.password || "");
 
@@ -155,6 +190,17 @@ function crearApp(pool, { registrar = console } = {}) {
 
   app.get("/api/auth/perfil", autenticar, envolver(async (req, res) => {
     res.json({ status: "success", usuario: req.usuario });
+  }));
+
+  // --- Notificaciones push ------------------------------------------------
+  app.post("/api/notificaciones/token", autenticar, envolver(async (req, res) => {
+    const token = String(req.body?.token || "").trim();
+    if (token.length < 20 || token.length > 400) {
+      throw new ErrorValidacion([{ campo: "token", mensaje: "Token de notificaciones inválido" }]);
+    }
+
+    await pool.query("UPDATE usuarios SET fcm_token = $1 WHERE id = $2", [token, req.usuario.id]);
+    res.json({ status: "success", push_activo: push.configurado() });
   }));
 
   // --- Composteras --------------------------------------------------------
@@ -279,6 +325,11 @@ function crearApp(pool, { registrar = console } = {}) {
       } catch (error) {
         registrar.error("[alertas] no se pudieron registrar:", error.message);
       }
+
+      // El aviso push no bloquea la respuesta al dispositivo.
+      avisarAlerta(medicion.id_compostera, clasificacion).catch((error) =>
+        registrar.error("[push] no se pudo avisar:", error.message),
+      );
     }
 
     registrar.log(

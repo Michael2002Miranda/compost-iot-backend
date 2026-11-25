@@ -178,3 +178,8 @@ ALTER TABLE composteras ADD COLUMN IF NOT EXISTS dispositivo_id TEXT;
 CREATE UNIQUE INDEX IF NOT EXISTS idx_composteras_dispositivo
     ON composteras (dispositivo_id)
  WHERE dispositivo_id IS NOT NULL;
+
+-- ---------------------------------------------------------------------------
+-- Token del teléfono para las notificaciones push (Firebase Cloud Messaging).
+-- ---------------------------------------------------------------------------
+ALTER TABLE usuarios ADD COLUMN IF NOT EXISTS fcm_token TEXT;
