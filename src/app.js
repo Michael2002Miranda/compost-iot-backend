@@ -118,11 +118,17 @@ function crearApp(pool, { registrar = console } = {}) {
       throw error;
     }
 
+    const investigadores = String(process.env.ADMIN_EMAILS || "")
+      .split(",")
+      .map((correo) => correo.trim().toLowerCase())
+      .filter(Boolean);
+    const rol = investigadores.includes(email) ? "investigador" : "usuario";
+
     const { rows } = await pool.query(
-      `INSERT INTO usuarios (nombre, email, password_hash)
-       VALUES ($1, $2, $3)
-       RETURNING id, nombre, email, creado_en`,
-      [nombre.slice(0, 80), email, hashPassword(password)],
+      `INSERT INTO usuarios (nombre, email, password_hash, rol)
+       VALUES ($1, $2, $3, $4)
+       RETURNING id, nombre, email, rol, creado_en`,
+      [nombre.slice(0, 80), email, hashPassword(password), rol],
     );
 
     const usuario = rows[0];
@@ -132,7 +138,7 @@ function crearApp(pool, { registrar = console } = {}) {
   app.post("/api/auth/login", envolver(async (req, res) => {
     const { email, password } = validarCredenciales(req.body);
     const { rows } = await pool.query(
-      "SELECT id, nombre, email, password_hash FROM usuarios WHERE email = $1",
+      "SELECT id, nombre, email, rol, password_hash FROM usuarios WHERE email = $1",
       [email],
     );
 
@@ -210,7 +216,7 @@ function crearApp(pool, { registrar = console } = {}) {
     let idCompostera = datos.id_compostera;
     if (datos.codigo_dispositivo) {
       const { rows } = await pool.query(
-        "SELECT id FROM composteras WHERE codigo = $1",
+        "SELECT id, dispositivo_id FROM composteras WHERE codigo = $1",
         [datos.codigo_dispositivo],
       );
       if (rows.length === 0) {
@@ -219,7 +225,28 @@ function crearApp(pool, { registrar = console } = {}) {
           mensaje: `No existe una compostera con el código ${datos.codigo_dispositivo}`,
         }]);
       }
-      idCompostera = rows[0].id;
+
+      const compostera = rows[0];
+
+      // Vinculación del equipo físico: el primero que usa el código queda
+      // registrado; un segundo equipo con el mismo código se rechaza para que
+      // no se mezclen los datos de dos viviendas.
+      if (datos.dispositivo_id) {
+        if (!compostera.dispositivo_id) {
+          await pool.query(
+            "UPDATE composteras SET dispositivo_id = $1 WHERE id = $2",
+            [datos.dispositivo_id, compostera.id],
+          );
+        } else if (compostera.dispositivo_id !== datos.dispositivo_id) {
+          const error = new Error(
+            "Este código ya está vinculado a otro equipo. Genere un código nuevo desde la aplicación.",
+          );
+          error.status = 409;
+          throw error;
+        }
+      }
+
+      idCompostera = compostera.id;
     } else {
       const { rows } = await pool.query("SELECT 1 FROM composteras WHERE id = $1", [idCompostera]);
       if (rows.length === 0) {
@@ -584,6 +611,137 @@ function crearApp(pool, { registrar = console } = {}) {
       ],
     );
     res.status(201).json({ status: "success", data: rows[0] });
+  }));
+
+  // --- Panel del investigador ---------------------------------------------
+  // Solo la cuenta marcada como investigador puede ver todas las composteras
+  // del estudio y exportar los datos juntos.
+  const exigirInvestigador = (req, res, next) => {
+    if (req.usuario?.rol !== "investigador") {
+      return res.status(403).json({
+        status: "error",
+        mensaje: "Esta sección es solo para el investigador del estudio.",
+      });
+    }
+    return next();
+  };
+
+  app.get("/api/admin/composteras", autenticar, exigirInvestigador, envolver(async (_req, res) => {
+    const { rows } = await pool.query(
+      `SELECT c.id, c.nombre, c.grupo, c.codigo, c.dispositivo_id, c.ubicacion,
+              c.activa, c.creada_en,
+              u.nombre AS participante, u.email,
+              COUNT(m.id)::int AS lecturas,
+              MAX(m.fecha_hora) AS ultima_lectura,
+              MIN(m.fecha_hora) AS primera_lectura
+         FROM composteras c
+         LEFT JOIN usuarios u ON u.id = c.usuario_id
+         LEFT JOIN mediciones m ON m.id_compostera = c.id
+        GROUP BY c.id, u.nombre, u.email
+        ORDER BY c.grupo, c.id`,
+    );
+
+    res.json({ status: "success", total: rows.length, data: rows });
+  }));
+
+  app.patch("/api/admin/composteras/:id", autenticar, exigirInvestigador, envolver(async (req, res) => {
+    const id = Number(req.params.id);
+    if (!Number.isInteger(id) || id <= 0) {
+      throw new ErrorValidacion([{ campo: "id", mensaje: "Debe ser un entero positivo" }]);
+    }
+
+    const { rows: actuales } = await pool.query("SELECT * FROM composteras WHERE id = $1", [id]);
+    if (actuales.length === 0) {
+      return res.status(404).json({ status: "error", mensaje: "Compostera no encontrada" });
+    }
+    const actual = actuales[0];
+
+    let grupo = actual.grupo;
+    if (req.body?.grupo !== undefined) {
+      grupo = String(req.body.grupo).toUpperCase();
+      if (!["GC", "GE"].includes(grupo)) {
+        throw new ErrorValidacion([{ campo: "grupo", mensaje: "Debe ser GC o GE" }]);
+      }
+    }
+
+    const nombre = req.body?.nombre ? String(req.body.nombre).trim().slice(0, 80) : actual.nombre;
+
+    const { rows } = await pool.query(
+      "UPDATE composteras SET grupo = $1, nombre = $2 WHERE id = $3 RETURNING *",
+      [grupo, nombre, id],
+    );
+    return res.json({ status: "success", data: rows[0] });
+  }));
+
+  app.get("/api/admin/resumen", autenticar, exigirInvestigador, envolver(async (_req, res) => {
+    const { rows: grupos } = await pool.query(
+      `SELECT c.grupo,
+              COUNT(DISTINCT c.id)::int AS composteras,
+              COUNT(DISTINCT c.usuario_id)::int AS participantes,
+              COUNT(m.id)::int AS lecturas
+         FROM composteras c
+         LEFT JOIN mediciones m ON m.id_compostera = c.id
+        GROUP BY c.grupo
+        ORDER BY c.grupo`,
+    );
+
+    const { rows: usuarios } = await pool.query("SELECT COUNT(*)::int AS total FROM usuarios");
+    const { rows: alertas } = await pool.query(
+      "SELECT COUNT(*)::int AS pendientes FROM alertas WHERE atendida = FALSE",
+    );
+    const { rows: ppfm } = await pool.query(
+      "SELECT COUNT(*)::int AS total, ROUND(AVG(precision), 2) AS promedio FROM registros_ppfm",
+    );
+    const { rows: cfc } = await pool.query(
+      `SELECT COUNT(*)::int AS total,
+              COUNT(*) FILTER (WHERE maduro)::int AS maduros
+         FROM registros_cfc`,
+    );
+
+    res.json({
+      status: "success",
+      grupos,
+      usuarios: usuarios[0]?.total ?? 0,
+      alertas_pendientes: alertas[0]?.pendientes ?? 0,
+      ppfm: ppfm[0] ?? { total: 0, promedio: null },
+      cfc: cfc[0] ?? { total: 0, maduros: 0 },
+    });
+  }));
+
+  app.get("/api/admin/export.csv", autenticar, exigirInvestigador, envolver(async (_req, res) => {
+    const { rows } = await pool.query(
+      `SELECT m.id, c.id AS id_compostera, c.nombre AS compostera,
+              c.grupo, u.nombre AS participante, u.email,
+              c.codigo, c.dispositivo_id,
+              m.temperatura, m.humedad, m.ph, m.ph_simulado, m.fecha_hora
+         FROM mediciones m
+         JOIN composteras c ON c.id = m.id_compostera
+         LEFT JOIN usuarios u ON u.id = c.usuario_id
+        ORDER BY c.grupo, c.id, m.fecha_hora ASC
+        LIMIT 20000`,
+    );
+
+    const encabezado = [
+      "id", "id_compostera", "compostera", "grupo", "participante", "email",
+      "codigo", "dispositivo_id", "temperatura", "humedad", "ph", "ph_simulado", "fecha_hora",
+    ];
+    const lineas = [encabezado.join(",")];
+    for (const fila of rows) {
+      lineas.push(
+        encabezado
+          .map((campo) => {
+            const valor = fila[campo];
+            if (valor === null || valor === undefined) return "";
+            const texto = String(valor);
+            return /[",;\n]/.test(texto) ? `"${texto.replace(/"/g, '""')}"` : texto;
+          })
+          .join(","),
+      );
+    }
+
+    res.setHeader("Content-Type", "text/csv; charset=utf-8");
+    res.setHeader("Content-Disposition", 'attachment; filename="estudio_compostaje.csv"');
+    res.send(`\uFEFF${lineas.join("\r\n")}`);
   }));
 
   // --- Exportación para el análisis estadístico ---------------------------

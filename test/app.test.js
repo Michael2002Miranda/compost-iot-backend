@@ -9,7 +9,14 @@ const USUARIO = { id: 1, nombre: "Ana Torres", email: "ana@upao.edu.pe", creado_
 const PASSWORD = "compost2026";
 
 /** Pool de PostgreSQL simulado: responde según la consulta SQL. */
-function crearPoolFalso({ ultima = null, fallar = false, passwordHash = hashPassword(PASSWORD), usuarioExiste = false } = {}) {
+function crearPoolFalso({
+  ultima = null,
+  fallar = false,
+  passwordHash = hashPassword(PASSWORD),
+  usuarioExiste = false,
+  rol = "usuario",
+  dispositivoVinculado = null,
+} = {}) {
   const escrituras = [];
 
   return {
@@ -22,24 +29,32 @@ function crearPoolFalso({ ultima = null, fallar = false, passwordHash = hashPass
       if (consulta.includes("COUNT(*)::int AS total")) return { rows: [{ total: 12 }] };
 
       // Autenticación
-      if (consulta.startsWith("SELECT id, nombre, email, password_hash FROM usuarios")) {
+      if (consulta.startsWith("SELECT id, nombre, email, rol, password_hash FROM usuarios")) {
         const coincide = params[0] === USUARIO.email;
-        return { rows: coincide ? [{ ...USUARIO, password_hash: passwordHash }] : [] };
+        return { rows: coincide ? [{ ...USUARIO, rol, password_hash: passwordHash }] : [] };
       }
-      if (consulta.startsWith("SELECT id, nombre, email FROM usuarios")) {
-        return { rows: params[0] === USUARIO.id ? [USUARIO] : [] };
+      if (consulta.startsWith("SELECT id, nombre, email, rol FROM usuarios")) {
+        return { rows: params[0] === USUARIO.id ? [{ ...USUARIO, rol }] : [] };
       }
       if (consulta.startsWith("SELECT 1 FROM usuarios WHERE email")) {
         return { rows: usuarioExiste ? [{ "?column?": 1 }] : [] };
       }
       if (consulta.startsWith("INSERT INTO usuarios")) {
         escrituras.push({ tabla: "usuarios", params });
-        return { rows: [USUARIO] };
+        return { rows: [{ ...USUARIO, rol: params[3] }] };
       }
 
       // Composteras
-      if (consulta.startsWith("SELECT id FROM composteras WHERE codigo")) {
-        return { rows: params[0] === "CMP-1234" ? [{ id: 5 }] : [] };
+      if (consulta.startsWith("SELECT id, dispositivo_id FROM composteras WHERE codigo")) {
+        return {
+          rows: params[0] === "CMP-1234"
+            ? [{ id: 5, dispositivo_id: dispositivoVinculado }]
+            : [],
+        };
+      }
+      if (consulta.startsWith("UPDATE composteras SET dispositivo_id")) {
+        escrituras.push({ tabla: "composteras_dispositivo", params });
+        return { rows: [] };
       }
       if (consulta.startsWith("SELECT 1 FROM composteras WHERE id")) {
         return { rows: params[0] === 1 ? [{ id: 1 }] : [] };
@@ -296,9 +311,90 @@ test("POST /api/mediciones exige x-api-key cuando DEVICE_API_KEY está definida"
 
 test("Las rutas inexistentes responden 404 en JSON", async () => {
   await conServidor(crearPoolFalso(), async (base) => {
-    const res = await fetch(`${base}/api/no-existe`);
+    const res = await fetch(`${base}/api/no-api`);
     assert.equal(res.status, 404);
     const cuerpo = await res.json();
     assert.equal(cuerpo.status, "error");
+  });
+});
+
+test("El primer equipo que usa un código queda vinculado a la compostera", async () => {
+  const pool = crearPoolFalso();
+  await conServidor(pool, async (base) => {
+    const res = await fetch(`${base}/api/mediciones`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        codigo_dispositivo: "CMP-1234",
+        dispositivo_id: "AA:BB:CC:DD:EE:01",
+        temperatura: 30,
+        humedad: 60,
+        ph: 7,
+      }),
+    });
+
+    assert.equal(res.status, 201);
+    const vinculacion = pool.escrituras.find((e) => e.tabla === "composteras_dispositivo");
+    assert.ok(vinculacion, "debe registrar el equipo en la compostera");
+    assert.equal(vinculacion.params[0], "AA:BB:CC:DD:EE:01");
+    assert.equal(vinculacion.params[1], 5);
+  });
+});
+
+test("Un segundo equipo con el mismo código es rechazado con 409", async () => {
+  const pool = crearPoolFalso({ dispositivoVinculado: "AA:BB:CC:DD:EE:01" });
+  await conServidor(pool, async (base) => {
+    const res = await fetch(`${base}/api/mediciones`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        codigo_dispositivo: "CMP-1234",
+        dispositivo_id: "AA:BB:CC:DD:EE:99",
+        temperatura: 30,
+        humedad: 60,
+        ph: 7,
+      }),
+    });
+
+    assert.equal(res.status, 409);
+    const cuerpo = await res.json();
+    assert.match(cuerpo.mensaje, /vinculado a otro equipo/i);
+    assert.equal(pool.escrituras.filter((e) => e.tabla === "mediciones").length, 0);
+  });
+});
+
+test("El mismo equipo puede seguir enviando con su código", async () => {
+  const pool = crearPoolFalso({ dispositivoVinculado: "AA:BB:CC:DD:EE:01" });
+  await conServidor(pool, async (base) => {
+    const res = await fetch(`${base}/api/mediciones`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        codigo_dispositivo: "CMP-1234",
+        dispositivo_id: "AA:BB:CC:DD:EE:01",
+        temperatura: 31,
+        humedad: 62,
+        ph: 7,
+      }),
+    });
+    assert.equal(res.status, 201);
+  });
+});
+
+test("El panel del investigador rechaza a un usuario normal con 403", async () => {
+  await conServidor(crearPoolFalso({ rol: "usuario" }), async (base) => {
+    for (const ruta of ["/api/admin/composteras", "/api/admin/resumen", "/api/admin/export.csv"]) {
+      const res = await fetch(`${base}${ruta}`, { headers: autorizacion() });
+      assert.equal(res.status, 403, `${ruta} debería estar restringida`);
+    }
+  });
+});
+
+test("El investigador puede listar las composteras del estudio", async () => {
+  await conServidor(crearPoolFalso({ rol: "investigador" }), async (base) => {
+    const res = await fetch(`${base}/api/admin/composteras`, { headers: autorizacion() });
+    assert.equal(res.status, 200);
+    const cuerpo = await res.json();
+    assert.equal(cuerpo.status, "success");
   });
 });

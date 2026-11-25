@@ -97,9 +97,17 @@ function validarMedicion(body = {}) {
     throw new ErrorValidacion([{ campo: "codigo_dispositivo", mensaje: "Máximo 40 caracteres" }]);
   }
 
+  // Identificador físico del equipo (MAC). Sirve para que un mismo código no
+  // pueda ser usado por dos dispositivos distintos.
+  const dispositivo = body.dispositivo_id ? String(body.dispositivo_id).trim().toUpperCase() : null;
+  if (dispositivo && dispositivo.length > 40) {
+    throw new ErrorValidacion([{ campo: "dispositivo_id", mensaje: "Máximo 40 caracteres" }]);
+  }
+
   return {
     id_compostera: campos.id_compostera,
     codigo_dispositivo: codigo,
+    dispositivo_id: dispositivo,
     temperatura: campos.temperatura,
     humedad: campos.humedad,
     ph: campos.ph,

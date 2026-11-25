@@ -156,3 +156,25 @@ SELECT m.id,
        m.fecha_hora
   FROM mediciones m
   LEFT JOIN composteras c ON c.id = m.id_compostera;
+
+-- ---------------------------------------------------------------------------
+-- Rol del usuario
+--   'usuario'       participante: ve únicamente sus composteras.
+--   'investigador'  tesista: ve las 30 composteras y exporta todo junto.
+-- ---------------------------------------------------------------------------
+ALTER TABLE usuarios ADD COLUMN IF NOT EXISTS rol TEXT NOT NULL DEFAULT 'usuario';
+ALTER TABLE usuarios DROP CONSTRAINT IF EXISTS usuarios_rol_check;
+ALTER TABLE usuarios ADD CONSTRAINT usuarios_rol_check
+    CHECK (rol IN ('usuario', 'investigador'));
+
+-- ---------------------------------------------------------------------------
+-- Equipo físico vinculado a la compostera.
+-- El ESP32 envía su MAC en cada lectura; el primero que usa un código queda
+-- registrado y un segundo equipo con el mismo código es rechazado, de modo
+-- que no se mezclen los datos de dos viviendas.
+-- ---------------------------------------------------------------------------
+ALTER TABLE composteras ADD COLUMN IF NOT EXISTS dispositivo_id TEXT;
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_composteras_dispositivo
+    ON composteras (dispositivo_id)
+ WHERE dispositivo_id IS NOT NULL;

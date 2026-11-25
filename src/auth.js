@@ -109,7 +109,7 @@ function crearMiddlewareAutenticacion(pool) {
       }
 
       const { rows } = await pool.query(
-        "SELECT id, nombre, email FROM usuarios WHERE id = $1",
+        "SELECT id, nombre, email, rol FROM usuarios WHERE id = $1",
         [payload.sub],
       );
       if (rows.length === 0) {

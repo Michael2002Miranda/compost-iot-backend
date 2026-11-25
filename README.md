@@ -40,6 +40,8 @@ Crea: `usuarios`, `composteras`, `mediciones`, `alertas`, `registros_ppfm`,
 | `DB_SSL` | no | `false` solo para una base local |
 | `JWT_SECRET` | sí en producción | Firma de los tokens de sesión |
 | `DEVICE_API_KEY` | recomendada | Clave que debe enviar el ESP32 en `x-api-key` |
+| `ADMIN_EMAILS` | no | Correos separados por coma que se crean con rol de investigador |
+| `AUTO_MIGRAR` | no | `false` desactiva la aplicación automática del esquema |
 | `PORT` | no | 3000 por defecto |
 
 ---
@@ -85,6 +87,22 @@ Crea: `usuarios`, `composteras`, `mediciones`, `alertas`, `registros_ppfm`,
 | `POST` | `/api/pruebas/funcionalidad` | Casos de prueba |
 | `GET` | `/api/export/mediciones.csv` | Exportación para el análisis estadístico |
 
+### Solo para el investigador (`rol = 'investigador'`)
+
+| Método | Ruta | Uso |
+|---|---|---|
+| `GET` | `/api/admin/composteras` | Las 30 composteras del estudio, con su participante y su equipo |
+| `PATCH` | `/api/admin/composteras/:id` | Cambiar nombre o grupo (GC/GE) |
+| `GET` | `/api/admin/resumen` | Totales por grupo, usuarios, alertas, PPFM y CFC |
+| `GET` | `/api/admin/export.csv` | Estudio completo en un solo CSV |
+
+Para habilitar ese rol: definirlo en `ADMIN_EMAILS` antes del registro o promover una
+cuenta existente:
+
+```bash
+npm run promover -- correo@ejemplo.com
+```
+
 ---
 
 ## 4. Ingesta desde el ESP32
@@ -93,7 +111,7 @@ Crea: `usuarios`, `composteras`, `mediciones`, `alertas`, `registros_ppfm`,
 curl -X POST https://compost-iot-backend.onrender.com/api/mediciones \
   -H "Content-Type: application/json" \
   -H "x-api-key: TU_CLAVE" \
-  -d '{"codigo_dispositivo":"CMP-4F2A","temperatura":52.3,"humedad":61.0,"ph":7.1,"ph_simulado":true}'
+  -d '{"codigo_dispositivo":"CMP-4F2A","dispositivo_id":"AA:BB:CC:DD:EE:01","temperatura":52.3,"humedad":61.0,"ph":7.1,"ph_simulado":true}'
 ```
 
 Respuesta:
@@ -116,9 +134,35 @@ El dispositivo puede identificarse de dos formas:
 - `codigo_dispositivo` (recomendado): el código que la app muestra al registrar la compostera.
 - `id_compostera`: identificador numérico, se conserva por compatibilidad con el firmware anterior.
 
+**Vinculación del equipo.** La primera vez que un código llega con `dispositivo_id`
+(la MAC del ESP32), esa compostera queda vinculada a ese equipo. Si otro equipo intenta
+usar el mismo código, la API responde `409` y no guarda la lectura, de modo que no se
+mezclan los datos de dos viviendas.
+
 ---
 
-## 5. Reglas del dominio
+## 5. Configuración del equipo sin computadora
+
+El firmware `firmware/esp32_compost_iot.ino` usa **WiFiManager**: no lleva el WiFi ni el
+código escritos. La primera vez (o al cambiar de casa) el equipo abre la red
+`CompostIoT-Setup`; desde el celular se elige la red de la casa, se escribe la
+contraseña y el **código de la compostera**. Todo queda guardado en la memoria del
+ESP32.
+
+- Para reconfigurarlo: mantener pulsado el botón **BOOT** (GPIO0) 3 segundos.
+- Si se pierde la red, el equipo reabre el portal solo.
+- El LED integrado indica el estado: encendido = enviando; parpadeos = error.
+
+Librerías necesarias (Gestor de librerías de Arduino): **WiFiManager** (2.0.17+),
+**ArduinoJson** (6.x), **DHT sensor library** + **Adafruit Unified Sensor**.
+Placa: *ESP32 Dev Module*.
+
+Un mismo firmware sirve para todos los prototipos: solo cambia lo que se escribe en el
+portal de cada casa.
+
+---
+
+## 6. Reglas del dominio
 
 | Parámetro | Rangos |
 |---|---|
@@ -135,7 +179,7 @@ Los umbrales están en `src/domain/clasificacion.js` y replicados en la app
 
 ---
 
-## 6. Estructura
+## 7. Estructura
 
 ```
 src/
@@ -143,10 +187,12 @@ src/
   index.js                  arranque y cierre ordenado
   auth.js                   hash de contraseñas y tokens
   validacion.js             validación de cuerpos y filtros
+  migrar.js                 aplica db/schema.sql al arrancar
   domain/clasificacion.js   PFC: rangos, fase y alertas
   domain/precision.js       PPFM
   db.js                     pool de PostgreSQL
 db/schema.sql               esquema completo
-firmware/esp32_compost_iot.ino
-test/                       30 pruebas (node:test)
+firmware/esp32_compost_iot.ino   WiFiManager + código + MAC
+scripts/promover-investigador.js
+test/                       37 pruebas (node:test)
 ```
