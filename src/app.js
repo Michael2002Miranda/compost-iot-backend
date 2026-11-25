@@ -708,8 +708,106 @@ function crearApp(pool, { registrar = console } = {}) {
     });
   }));
 
-  app.get("/api/admin/export.csv", autenticar, exigirInvestigador, envolver(async (_req, res) => {
+  app.get("/api/admin/registros", autenticar, exigirInvestigador, envolver(async (_req, res) => {
+    const { rows: ppfm } = await pool.query(
+      `SELECT r.*, c.nombre AS compostera, c.grupo, u.nombre AS participante, u.email
+         FROM registros_ppfm r
+         JOIN composteras c ON c.id = r.id_compostera
+         LEFT JOIN usuarios u ON u.id = c.usuario_id
+        ORDER BY r.fecha DESC
+        LIMIT 2000`,
+    );
+
+    const { rows: cfc } = await pool.query(
+      `SELECT r.*, c.nombre AS compostera, c.grupo, u.nombre AS participante, u.email
+         FROM registros_cfc r
+         JOIN composteras c ON c.id = r.id_compostera
+         LEFT JOIN usuarios u ON u.id = c.usuario_id
+        ORDER BY r.fecha DESC
+        LIMIT 2000`,
+    );
+
+    res.json({ status: "success", ppfm, cfc });
+  }));
+
+  app.get("/api/admin/evaluaciones", autenticar, exigirInvestigador, envolver(async (_req, res) => {
+    const { rows: sus } = await pool.query(
+      `SELECT s.id, s.evaluador, s.respuestas, s.puntaje, s.fecha,
+              u.nombre AS participante, u.email
+         FROM evaluaciones_sus s
+         LEFT JOIN usuarios u ON u.id = s.usuario_id
+        ORDER BY s.fecha DESC
+        LIMIT 500`,
+    );
+
+    const { rows: pruebas } = await pool.query(
+      `SELECT p.id, p.caso, p.descripcion, p.aprobado, p.observacion, p.fecha,
+              u.nombre AS participante, u.email
+         FROM pruebas_funcionalidad p
+         LEFT JOIN usuarios u ON u.id = p.usuario_id
+        ORDER BY p.fecha DESC
+        LIMIT 500`,
+    );
+
+    const aprobadas = pruebas.filter((p) => p.aprobado).length;
+    const promedioSus = sus.length
+      ? Math.round((sus.reduce((a, s) => a + Number(s.puntaje || 0), 0) / sus.length) * 100) / 100
+      : null;
+
+    res.json({
+      status: "success",
+      sus,
+      pruebas,
+      resumen: { evaluaciones: sus.length, promedio_sus: promedioSus, pruebas: pruebas.length, aprobadas },
+    });
+  }));
+
+  app.get("/api/admin/export-registros.csv", autenticar, exigirInvestigador, envolver(async (req, res) => {
+    const tipo = String(req.query.tipo || "ppfm").toLowerCase();
+    const esCfc = tipo === "cfc";
+
     const { rows } = await pool.query(
+      esCfc
+        ? `SELECT r.id, c.nombre AS compostera, c.grupo, u.nombre AS participante, u.email,
+                  r.color, r.aroma, r.textura, r.humedad, r.puntaje, r.maduro, r.fecha, r.observaciones
+             FROM registros_cfc r
+             JOIN composteras c ON c.id = r.id_compostera
+             LEFT JOIN usuarios u ON u.id = c.usuario_id
+            ORDER BY r.fecha ASC
+            LIMIT 5000`
+        : `SELECT r.id, c.nombre AS compostera, c.grupo, u.nombre AS participante, u.email,
+                  r.parametro, r.valor_medido, r.valor_referencia, r.precision, r.error, r.fecha, r.observaciones
+             FROM registros_ppfm r
+             JOIN composteras c ON c.id = r.id_compostera
+             LEFT JOIN usuarios u ON u.id = c.usuario_id
+            ORDER BY r.fecha ASC
+            LIMIT 5000`,
+    );
+
+    const encabezado = esCfc
+      ? ["id", "compostera", "grupo", "participante", "email", "color", "aroma", "textura", "humedad", "puntaje", "maduro", "fecha", "observaciones"]
+      : ["id", "compostera", "grupo", "participante", "email", "parametro", "valor_medido", "valor_referencia", "precision", "error", "fecha", "observaciones"];
+
+    const lineas = [encabezado.join(",")];
+    for (const fila of rows) {
+      lineas.push(
+        encabezado
+          .map((campo) => {
+            const valor = fila[campo];
+            if (valor === null || valor === undefined) return "";
+            const texto = String(valor);
+            return /[",;\n]/.test(texto) ? `"${texto.replace(/"/g, '""')}"` : texto;
+          })
+          .join(","),
+      );
+    }
+
+    res.setHeader("Content-Type", "text/csv; charset=utf-8");
+    res.setHeader("Content-Disposition", `attachment; filename="${tipo}_compostaje.csv"`);
+    res.send(`\uFEFF${lineas.join("\r\n")}`);
+  }));
+
+  app.get("/api/admin/export.csv", autenticar, exigirInvestigador, envolver(async (_req, res) => {    const { rows } = await pool.query(
       `SELECT m.id, c.id AS id_compostera, c.nombre AS compostera,
               c.grupo, u.nombre AS participante, u.email,
               c.codigo, c.dispositivo_id,

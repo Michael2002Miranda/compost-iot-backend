@@ -398,3 +398,28 @@ test("El investigador puede listar las composteras del estudio", async () => {
     assert.equal(cuerpo.status, "success");
   });
 });
+
+test("Las fichas y evaluaciones solo las ve el investigador", async () => {
+  await conServidor(crearPoolFalso({ rol: "usuario" }), async (base) => {
+    for (const ruta of ["/api/admin/registros", "/api/admin/evaluaciones", "/api/admin/export-registros.csv"]) {
+      const res = await fetch(`${base}${ruta}`, { headers: autorizacion() });
+      assert.equal(res.status, 403, `${ruta} debería estar restringida`);
+    }
+  });
+});
+
+test("El investigador obtiene las fichas y las evaluaciones", async () => {
+  await conServidor(crearPoolFalso({ rol: "investigador" }), async (base) => {
+    const registros = await fetch(`${base}/api/admin/registros`, { headers: autorizacion() });
+    assert.equal(registros.status, 200);
+    const cuerpoRegistros = await registros.json();
+    assert.deepEqual(cuerpoRegistros.ppfm, []);
+    assert.deepEqual(cuerpoRegistros.cfc, []);
+
+    const evaluaciones = await fetch(`${base}/api/admin/evaluaciones`, { headers: autorizacion() });
+    assert.equal(evaluaciones.status, 200);
+    const cuerpo = await evaluaciones.json();
+    assert.equal(cuerpo.resumen.pruebas, 0);
+    assert.equal(cuerpo.resumen.promedio_sus, null);
+  });
+});
